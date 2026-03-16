@@ -1,340 +1,650 @@
 -- ============================================================
---  phantom.lua  |  DEBUG VERSION  |  by maro
+--  phantom.lua  |  FIXED DEBUG VERSION  |  by maro
 -- ============================================================
 --[[
   .name    phantom
   .author  maro
-  .version 1.0-debug
+  .version 1.1-fixed
 ]]
 
--- ============================================================
---  Schritt 1: Script wird geparsed
---  Wenn diese Zeile in der Console erscheint → Script laeuft
--- ============================================================
-print("[phantom DEBUG] Script wird geladen (top-level)")
+print("[phantom] Script wird geladen (top-level)")
 
-local _ready  = false
-local _init_tried = false
-local lib     = nil
-local C       = {}
-local F       = {}
-local M       = {}
-local EA      = 'lua>elements a'
-local EB      = 'lua>elements b'
+local lib = nil
+local C = {}
+local F = {}
+local M = {}
+local EA = "lua>elements a"
+local EB = "lua>elements b"
 
--- Weapon Names (reines Lua, kein API)
+local _ready = false
+local _init_attempts = 0
+local _last_init_error = nil
+local _notified_ready = false
+local _gui_mode = "legacy"
+local _group_cache = {}
+local _pcall = _G and _G.pcall or nil
+local _color_defaults_applied = false
+
 local WEAPON_NAMES = {
-    [1]='Deagle',[7]='AK-47',[9]='AWP',[16]='M4A4',[60]='M4A1-S',
+    [1] = "Deagle",
+    [7] = "AK-47",
+    [9] = "AWP",
+    [16] = "M4A4",
+    [60] = "M4A1-S",
 }
-local function wpn_name(idx)
-    return WEAPON_NAMES[idx] or ('wpn#'..tostring(idx))
-end
 
 local cheaters = {}
 local bb_names = {}
-local stats    = {kills=0,deaths=0,assists=0,damage=0,hs=0,shots=0,hits=0}
-local dmg_log  = {}
-local hm_hits  = {}
-local ct_frame = 0; local ct_blink = true; local ct_tw = 1; local ct_fwd = true
-local DB       = "phantom_config.db"
+local stats = { kills = 0, deaths = 0, assists = 0, damage = 0, hs = 0, shots = 0, hits = 0 }
+local dmg_log = {}
+local hm_hits = {}
+local ct_frame = 0
+local ct_blink = true
+local ct_tw = 1
+local ct_fwd = true
+local DB = "phantom_config.db"
 local SHOT_LOG = "phantom_shots.txt"
-local AX_FILE  = "phantom_autoexec.cfg"
+local AX_FILE = "phantom_autoexec.cfg"
 
-print("[phantom DEBUG] Variablen initialisiert")
+local function wpn_name(idx)
+    return WEAPON_NAMES[idx] or ("wpn#" .. tostring(idx))
+end
 
--- ============================================================
---  INIT FUNKTION
--- ============================================================
-local function init()
-    if _ready then return true end
-    if _init_tried then return false end  -- verhindert endlos-retry
-    _init_tried = true
-
-    print("[phantom DEBUG] init() wird ausgefuehrt...")
-
-    -- utils verfuegbar?
-    if not utils then
-        print("[phantom DEBUG] FEHLER: utils ist nil!")
-        return false
+local function log_init_error(msg)
+    if _last_init_error ~= msg then
+        _last_init_error = msg
+        print("[phantom] init fehlgeschlagen: " .. tostring(msg))
     end
-    print("[phantom DEBUG] utils ist verfuegbar")
+end
 
-    -- utils.load_file verfuegbar?
-    if not utils.load_file then
-        print("[phantom DEBUG] FEHLER: utils.load_file ist nil!")
-        return false
+local function try_call(fn, ...)
+    if _pcall then
+        return _pcall(fn, ...)
     end
-    print("[phantom DEBUG] utils.load_file ist verfuegbar")
 
-    -- Library laden
-    print("[phantom DEBUG] Versuche phantom_lib.lua zu laden...")
-    local content = utils.load_file("fatality/scripts/phantom_lib.lua")
-    if not content then
-        print("[phantom DEBUG] FEHLER: phantom_lib.lua nicht gefunden!")
-        print("[phantom DEBUG] Pfad versucht: fatality/scripts/phantom_lib.lua")
-        -- Zweiten Pfad versuchen
-        content = utils.load_file("fatality\\scripts\\phantom_lib.lua")
-        if not content then
-            print("[phantom DEBUG] FEHLER: Auch mit Backslash nicht gefunden!")
-            return false
-        else
-            print("[phantom DEBUG] Mit Backslash gefunden!")
-        end
+    return true, fn(...)
+end
+
+local function detect_gui_mode()
+    if gui and gui.control_id and gui.make_control and gui.ctx and gui.ctx.find then
+        _gui_mode = "modern"
     else
-        print("[phantom DEBUG] phantom_lib.lua gefunden, Laenge: "..#content)
+        _gui_mode = "legacy"
+    end
+end
+
+local function ctrl_get(ctrl, default)
+    if not ctrl then
+        return default
     end
 
-    local chunk, err = load(content)
-    if not chunk then
-        print("[phantom DEBUG] FEHLER beim Kompilieren der Lib: "..tostring(err))
+    if ctrl.get then
+        local ok, value = try_call(ctrl.get, ctrl)
+        if ok then
+            return value
+        end
+    end
+
+    if ctrl.get_value then
+        local ok, holder = try_call(ctrl.get_value, ctrl)
+        if ok and holder and holder.get then
+            local ok_value, value = try_call(holder.get, holder)
+            if ok_value then
+                return value
+            end
+        end
+    end
+
+    if ctrl.value ~= nil then
+        return ctrl.value
+    end
+
+    return default
+end
+
+local function ctrl_set(ctrl, value)
+    if not ctrl then
         return false
     end
-    print("[phantom DEBUG] Lib kompiliert")
 
-    local ok, result = pcall(chunk)
-    if not ok or type(result) ~= "table" then
-        print("[phantom DEBUG] FEHLER beim Ausfuehren der Lib: "..tostring(result))
-        return false
+    if ctrl.set then
+        local ok = try_call(ctrl.set, ctrl, value)
+        if ok then
+            return true
+        end
     end
-    lib = result
-    print("[phantom DEBUG] Lib geladen: v"..(lib._version or "?"))
 
-    -- render verfuegbar?
-    if not render then
-        print("[phantom DEBUG] FEHLER: render ist nil!")
-        return false
+    if ctrl.set_value then
+        local ok = try_call(ctrl.set_value, ctrl, value)
+        if ok then
+            return true
+        end
     end
-    print("[phantom DEBUG] render ist verfuegbar")
 
-    -- gui verfuegbar?
+    if ctrl.set_text and type(value) == "string" then
+        local ok = try_call(ctrl.set_text, ctrl, value)
+        if ok then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function get_group(container_id)
+    if _group_cache[container_id] then
+        return _group_cache[container_id]
+    end
+
+    if _gui_mode ~= "modern" then
+        return nil
+    end
+
+    local ok, group = try_call(gui.ctx.find, gui.ctx, container_id)
+    if ok and group then
+        _group_cache[container_id] = group
+        return group
+    end
+
+    return nil
+end
+
+local function add_modern_control(container_id, label, control, extras)
+    local group = get_group(container_id)
+    if not group or not control then
+        return control
+    end
+
+    local row = gui.make_control(label or "", control)
+    if extras then
+        for _, extra in ipairs(extras) do
+            if extra then
+                try_call(row.add, row, extra)
+            end
+        end
+    end
+
+    try_call(group.add, group, row)
+    return control
+end
+
+local function mk_checkbox(id, container, label)
+    if _gui_mode == "modern" then
+        local modern_id = gui.control_id(id)
+        local control = gui.checkbox(modern_id)
+        return add_modern_control(container, label, control)
+    end
+
+    return gui.checkbox(id, container, label)
+end
+
+local function mk_color_picker(id, container, label, default, allow_alpha)
+    if _gui_mode == "modern" then
+        local modern_id = gui.control_id(id)
+        local control = gui.color_picker(modern_id, allow_alpha ~= false)
+        if default ~= nil then
+            ctrl_set(control, default)
+        end
+        return add_modern_control(container, label, control)
+    end
+
+    return gui.color_picker(id, container, label, default, allow_alpha)
+end
+
+local function mk_slider(id, container, label, min_value, max_value)
+    if _gui_mode == "modern" then
+        local modern_id = gui.control_id(id)
+        local control = gui.slider(modern_id, min_value, max_value, {"%.0f"})
+        return add_modern_control(container, label, control)
+    end
+
+    return gui.slider(id, container, label, min_value, max_value)
+end
+
+local function mk_textbox(id, container, label)
+    if _gui_mode == "modern" then
+        local modern_id = gui.control_id(id)
+        local control = gui.text_input(modern_id)
+        return add_modern_control(container, label or "", control)
+    end
+
+    return gui.textbox(id, container)
+end
+
+local function mk_button(id, container, label)
+    if _gui_mode == "modern" then
+        local modern_id = gui.control_id(id)
+        local control = gui.button(modern_id, label)
+        return add_modern_control(container, label, control)
+    end
+
+    return gui.button(id, container, label)
+end
+
+local function mk_combobox(id, container, label, allow_multiple, ...)
+    local items = { ... }
+
+    if _gui_mode == "modern" and gui.combo_box and gui.selectable then
+        local modern_id = gui.control_id(id)
+        local control = gui.combo_box(modern_id)
+        control.allow_multiple = allow_multiple and true or false
+        for i, item in ipairs(items) do
+            local sel = gui.selectable(gui.control_id(id .. ">sel" .. tostring(i)), item)
+            try_call(control.add, control, sel)
+        end
+        return add_modern_control(container, label, control)
+    end
+
+    return gui.combobox(id, container, allow_multiple, label, ...)
+end
+
+local function mk_list(id, container, label, allow_multiple, visible_items)
+    if _gui_mode == "modern" and gui.combo_box then
+        local modern_id = gui.control_id(id)
+        local control = gui.combo_box(modern_id)
+        control.allow_multiple = allow_multiple and true or false
+        return add_modern_control(container, label, control)
+    end
+
+    return gui.list(id, container, label, allow_multiple, visible_items)
+end
+
+local function try_load_file(path)
+    if not utils or not utils.load_file then
+        return nil
+    end
+
+    local ok, content = try_call(utils.load_file, path)
+    if not ok then
+        print("[phantom] utils.load_file Fehler bei '" .. tostring(path) .. "': " .. tostring(content))
+        return nil
+    end
+
+    return content
+end
+
+local function load_phantom_lib()
+    local candidates = {
+        "fatality/scripts/phantom_lib.lua",
+        "fatality\\scripts\\phantom_lib.lua",
+        "phantom_lib.lua",
+        ".\\phantom_lib.lua",
+    }
+
+    for _, path in ipairs(candidates) do
+        local content = try_load_file(path)
+        if content and #content > 0 then
+            local chunk, err = load(content, "@phantom_lib.lua")
+            if not chunk then
+                return nil, "phantom_lib.lua konnte nicht kompiliert werden: " .. tostring(err)
+            end
+
+            local ok, result = try_call(chunk)
+            if not ok then
+                return nil, "phantom_lib.lua Laufzeitfehler: " .. tostring(result)
+            end
+
+            if type(result) ~= "table" then
+                return nil, "phantom_lib.lua hat keine Tabelle zurueckgegeben"
+            end
+
+            print("[phantom] phantom_lib.lua geladen aus: " .. path)
+            return result
+        end
+    end
+
+    return nil, "phantom_lib.lua nicht gefunden"
+end
+
+local function ensure_runtime()
+    if _ready then
+        return true
+    end
+
+    _init_attempts = _init_attempts + 1
+
     if not gui then
-        print("[phantom DEBUG] FEHLER: gui ist nil!")
+        log_init_error("gui ist nil")
         return false
     end
-    print("[phantom DEBUG] gui ist verfuegbar")
 
-    -- mat verfuegbar?
+    if not render then
+        log_init_error("render ist nil")
+        return false
+    end
+
     if not mat then
-        print("[phantom DEBUG] FEHLER: mat ist nil!")
+        log_init_error("mat ist nil")
         return false
     end
-    print("[phantom DEBUG] mat ist verfuegbar")
 
-    -- Fonts
-    print("[phantom DEBUG] Erstelle Fonts...")
-    F.esp = render.create_font("verdana.ttf", 11, render.font_flag_outline)
-    F.hud = render.create_font("verdana.ttf", 12, render.font_flag_outline)
-    F.big = render.create_font("verdana.ttf", 13, render.font_flag_outline)
-    print("[phantom DEBUG] Fonts erstellt")
-
-    -- Materials
-    print("[phantom DEBUG] Erstelle Materials...")
-    M.vis = mat.create("phantom_vis","VertexLitGeneric",[[
-"VertexLitGeneric"{ "$basetexture" "vgui/white_additive" "$flat" "1" "$ignorez" "0" "$model" "1" }]])
-    M.wall = mat.create("phantom_wall","VertexLitGeneric",[[
-"VertexLitGeneric"{ "$basetexture" "vgui/white_additive" "$flat" "1" "$ignorez" "1" "$model" "1" "$additive" "1" }]])
-    print("[phantom DEBUG] Materials erstellt")
-
-    -- GUI
-    print("[phantom DEBUG] Erstelle GUI Controls in '"..EA.."'...")
-
-    -- Test: erstmal nur eine einzige Checkbox
-    local test_cb = gui.checkbox(EA..'>debug_test', EA, 'DEBUG: Script geladen!')
-    if test_cb then
-        print("[phantom DEBUG] Test-Checkbox erstellt! Typ: "..type(test_cb))
-    else
-        print("[phantom DEBUG] FEHLER: Test-Checkbox ist nil!")
+    if not utils then
+        log_init_error("utils ist nil")
+        return false
     end
 
-    -- Weitere Controls
-    C.v_enable    = gui.checkbox(EA..'>v_en',  EA, 'Enable Visuals')
-    C.v_watermark = gui.checkbox(EA..'>v_wm',  EA, 'Watermark')
-    C.v_esp_box   = gui.checkbox(EA..'>v_box', EA, 'ESP Box')
-    C.v_esp_hp    = gui.checkbox(EA..'>v_hp',  EA, 'Health Bar')
-    C.v_esp_name  = gui.checkbox(EA..'>v_nm',  EA, 'Name Flag')
-    C.v_esp_dist  = gui.checkbox(EA..'>v_di',  EA, 'Distance Flag')
-    C.v_hitmarker = gui.checkbox(EA..'>v_hm',  EA, 'Hit Marker')
-    C.v_chams     = gui.checkbox(EA..'>v_ch',  EA, 'Chams')
-    C.v_stats     = gui.checkbox(EA..'>v_st',  EA, 'Session Stats')
-    C.v_dmg_log   = gui.checkbox(EA..'>v_dl',  EA, 'Damage Log')
+    if not utils.load_file then
+        log_init_error("utils.load_file ist noch nicht verfuegbar")
+        return false
+    end
 
-    C.col_box_e   = gui.color_picker(EA..'>cbe', EA, 'Enemy Box',   render.color('#DC3C3C'), true)
-    C.col_box_v   = gui.color_picker(EA..'>cbv', EA, 'Visible Box', render.color('#3CFF3C'), true)
-    C.col_hm      = gui.color_picker(EA..'>chm', EA, 'Hit Marker',  render.color('#FF5050'), true)
-
-    C.ct_enable = gui.checkbox( EA..'>ct_on',  EA, 'Clan Tag Enable')
-    C.ct_tag    = gui.textbox(  EA..'>ct_tag', EA)
-    C.ct_mode   = gui.combobox( EA..'>ct_mo',  EA, 'CT Animation', false,
-        'Static','Scroll','Blink','Wave','Typewriter')
-    C.ct_speed  = gui.slider(   EA..'>ct_sp',  EA, 'CT Speed (ms)', 50, 1000)
-    C.ct_tag:set('fatality.win')
-    C.ct_speed:set(200)
-
-    C.m_rtt        = gui.checkbox(EA..'>m_rtt',  EA, 'RTT / Ping')
-    C.m_speedo     = gui.checkbox(EA..'>m_spd',  EA, 'Speedometer')
-    C.m_crosshair  = gui.checkbox(EA..'>m_xhair',EA, 'Custom Crosshair')
-    C.m_cross_size = gui.slider(  EA..'>m_xsz',  EA, 'Crosshair Size', 2, 20)
-    C.m_cross_gap  = gui.slider(  EA..'>m_xgap', EA, 'Crosshair Gap',  0, 15)
-    C.m_cross_size:set(6); C.m_cross_gap:set(4)
-
-    print("[phantom DEBUG] Elements A Controls erstellt")
-
-    -- Elements B
-    print("[phantom DEBUG] Erstelle GUI Controls in '"..EB.."'...")
-    C.bb_enable = gui.checkbox(EB..'>bb_en', EB, 'Blockbot Enable')
-    C.bb_dist   = gui.slider(  EB..'>bb_di', EB, 'Blockbot Distance', 20, 80)
-    C.bb_player = gui.list(    EB..'>bb_pl', EB, 'Blockbot Target', false, 100)
-    C.bb_dist:set(40)
-
-    C.ch_enable   = gui.checkbox(    EB..'>ch_en', EB, 'Cheater System')
-    C.ch_list     = gui.list(        EB..'>ch_li', EB, 'Marked Cheaters', false, 80)
-    C.col_cheater = gui.color_picker(EB..'>ch_co', EB, 'Cheater Color', render.color('#FFFF00'), true)
-
-    C.cfg_save  = gui.button(EB..'>csave',  EB, 'Save Config')
-    C.cfg_load  = gui.button(EB..'>cload',  EB, 'Load Config')
-
-    print("[phantom DEBUG] Elements B Controls erstellt")
-
-    -- Timers
-    lib.timer.every(200, function()
-        if not C.ct_tag then return end
-        local tag  = C.ct_tag:get()  or ''
-        local mode = C.ct_mode and C.ct_mode:get() or 'Static'
-        ct_frame=ct_frame+1; ct_blink=not ct_blink
-        if not C.ct_enable or not C.ct_enable:get() then
-            utils.set_clan_tag(''); return
+    if not lib then
+        local loaded_lib, err = load_phantom_lib()
+        if not loaded_lib then
+            log_init_error(err)
+            return false
         end
-        if mode=='Scroll' and #tag>0 then
-            local o=ct_frame%#tag
-            utils.set_clan_tag(tag:sub(o+1)..tag:sub(1,o))
-        else
-            utils.set_clan_tag(tag)
-        end
-    end)
 
-    lib.timer.every(2000, function()
-        bb_names = {}
-        if not lib then return end
-        local _,li = lib.player.local_ent()
-        entities.for_each_player(function(pl)
-            if not pl:is_valid() then return end
-            if pl:get_index()==li then return end
-            if (pl:get_prop("m_iHealth") or 0)<=0 then return end
-            bb_names[lib.player.name(pl,24)] = pl:get_index()
+        lib = loaded_lib
+    end
+
+    if not F.esp then
+        F.esp = render.create_font("verdana.ttf", 11, render.font_flag_outline)
+        F.hud = render.create_font("verdana.ttf", 12, render.font_flag_outline)
+        F.big = render.create_font("verdana.ttf", 13, render.font_flag_outline)
+    end
+
+    if not M.vis then
+        M.vis = mat.create("phantom_vis", "VertexLitGeneric", [[
+"VertexLitGeneric" { "$basetexture" "vgui/white_additive" "$flat" "1" "$ignorez" "0" "$model" "1" }
+]])
+        M.wall = mat.create("phantom_wall", "VertexLitGeneric", [[
+"VertexLitGeneric" { "$basetexture" "vgui/white_additive" "$flat" "1" "$ignorez" "1" "$model" "1" "$additive" "1" }
+]])
+    end
+
+    if not _color_defaults_applied then
+        _color_defaults_applied = true
+        ctrl_set(C.col_box_e, render.color("#DC3C3C"))
+        ctrl_set(C.col_box_v, render.color("#3CFF3C"))
+        ctrl_set(C.col_hm, render.color("#FF5050"))
+        ctrl_set(C.col_cheater, render.color("#FFFF00"))
+    end
+
+    if lib.timer then
+        lib.timer.every(200, function()
+            if not C.ct_tag then
+                return
+            end
+
+            local tag = ctrl_get(C.ct_tag, "") or ""
+            local mode = ctrl_get(C.ct_mode, "Static") or "Static"
+            ct_frame = ct_frame + 1
+            ct_blink = not ct_blink
+
+            if not C.ct_enable or not ctrl_get(C.ct_enable, false) then
+                utils.set_clan_tag("")
+                return
+            end
+
+            if mode == "Scroll" and #tag > 0 then
+                local o = ct_frame % #tag
+                utils.set_clan_tag(tag:sub(o + 1) .. tag:sub(1, o))
+            elseif mode == "Blink" then
+                utils.set_clan_tag(ct_blink and tag or "")
+            elseif mode == "Typewriter" then
+                if #tag == 0 then
+                    utils.set_clan_tag("")
+                else
+                    if ct_fwd then
+                        ct_tw = math.min(#tag, ct_tw + 1)
+                        if ct_tw >= #tag then
+                            ct_fwd = false
+                        end
+                    else
+                        ct_tw = math.max(1, ct_tw - 1)
+                        if ct_tw <= 1 then
+                            ct_fwd = true
+                        end
+                    end
+
+                    utils.set_clan_tag(tag:sub(1, ct_tw))
+                end
+            else
+                utils.set_clan_tag(tag)
+            end
         end)
-    end)
+
+        lib.timer.every(2000, function()
+            bb_names = {}
+
+            if not entities or not entities.for_each_player or not lib.player or not lib.player.local_ent then
+                return
+            end
+
+            local _, local_idx = lib.player.local_ent()
+            entities.for_each_player(function(pl)
+                if not pl:is_valid() then
+                    return
+                end
+
+                if pl:get_index() == local_idx then
+                    return
+                end
+
+                if (pl:get_prop("m_iHealth") or 0) <= 0 then
+                    return
+                end
+
+                bb_names[lib.player.name(pl, 24)] = pl:get_index()
+            end)
+        end)
+    end
 
     _ready = true
-    print("[phantom DEBUG] init() ERFOLGREICH abgeschlossen!")
-    gui.add_notification('phantom DEBUG', 'Init erfolgreich!')
+    _last_init_error = nil
+
+    if not _notified_ready and gui.add_notification then
+        _notified_ready = true
+        gui.add_notification("phantom", "Init erfolgreich")
+    end
+
+    print("[phantom] init erfolgreich nach Versuch #" .. tostring(_init_attempts))
     return true
 end
 
--- ============================================================
---  CALLBACKS
--- ============================================================
+-- Top-level GUI creation bleibt absichtlich hier, damit die Elemente sofort sichtbar sind.
+detect_gui_mode()
+print("[phantom] GUI-Modus: " .. _gui_mode)
+
+C.debug_test = mk_checkbox(EA .. ">debug_test", EA, "DEBUG: Script geladen!")
+
+C.v_enable = mk_checkbox(EA .. ">v_en", EA, "Enable Visuals")
+C.v_watermark = mk_checkbox(EA .. ">v_wm", EA, "Watermark")
+C.v_esp_box = mk_checkbox(EA .. ">v_box", EA, "ESP Box")
+C.v_esp_hp = mk_checkbox(EA .. ">v_hp", EA, "Health Bar")
+C.v_esp_name = mk_checkbox(EA .. ">v_nm", EA, "Name Flag")
+C.v_esp_dist = mk_checkbox(EA .. ">v_di", EA, "Distance Flag")
+C.v_hitmarker = mk_checkbox(EA .. ">v_hm", EA, "Hit Marker")
+C.v_chams = mk_checkbox(EA .. ">v_ch", EA, "Chams")
+C.v_stats = mk_checkbox(EA .. ">v_st", EA, "Session Stats")
+C.v_dmg_log = mk_checkbox(EA .. ">v_dl", EA, "Damage Log")
+
+C.col_box_e = mk_color_picker(EA .. ">cbe", EA, "Enemy Box", nil, true)
+C.col_box_v = mk_color_picker(EA .. ">cbv", EA, "Visible Box", nil, true)
+C.col_hm = mk_color_picker(EA .. ">chm", EA, "Hit Marker", nil, true)
+
+C.ct_enable = mk_checkbox(EA .. ">ct_on", EA, "Clan Tag Enable")
+C.ct_tag = mk_textbox(EA .. ">ct_tag", EA, "Clan Tag")
+C.ct_mode = mk_combobox(EA .. ">ct_mo", EA, "CT Animation", false, "Static", "Scroll", "Blink", "Wave", "Typewriter")
+C.ct_speed = mk_slider(EA .. ">ct_sp", EA, "CT Speed (ms)", 50, 1000)
+ctrl_set(C.ct_tag, "fatality.win")
+ctrl_set(C.ct_speed, 200)
+
+C.m_rtt = mk_checkbox(EA .. ">m_rtt", EA, "RTT / Ping")
+C.m_speedo = mk_checkbox(EA .. ">m_spd", EA, "Speedometer")
+C.m_crosshair = mk_checkbox(EA .. ">m_xhair", EA, "Custom Crosshair")
+C.m_cross_size = mk_slider(EA .. ">m_xsz", EA, "Crosshair Size", 2, 20)
+C.m_cross_gap = mk_slider(EA .. ">m_xgap", EA, "Crosshair Gap", 0, 15)
+ctrl_set(C.m_cross_size, 6)
+ctrl_set(C.m_cross_gap, 4)
+
+C.bb_enable = mk_checkbox(EB .. ">bb_en", EB, "Blockbot Enable")
+C.bb_dist = mk_slider(EB .. ">bb_di", EB, "Blockbot Distance", 20, 80)
+C.bb_player = mk_list(EB .. ">bb_pl", EB, "Blockbot Target", false, 100)
+ctrl_set(C.bb_dist, 40)
+
+C.ch_enable = mk_checkbox(EB .. ">ch_en", EB, "Cheater System")
+C.ch_list = mk_list(EB .. ">ch_li", EB, "Marked Cheaters", false, 80)
+C.col_cheater = mk_color_picker(EB .. ">ch_co", EB, "Cheater Color", nil, true)
+
+C.cfg_save = mk_button(EB .. ">csave", EB, "Save Config")
+C.cfg_load = mk_button(EB .. ">cload", EB, "Load Config")
+
 function on_game_event(event)
-    if not init() then return end
+    if not ensure_runtime() then
+        return
+    end
+
     local ename = event:get_name()
     local local_idx = engine.get_local_player()
-    if ename=='player_hurt' and event:get_int('attacker')==local_idx then
-        stats.damage = stats.damage + (event:get_int('dmg_health') or 0)
+
+    if ename == "player_hurt" and event:get_int("attacker") == local_idx then
+        stats.damage = stats.damage + (event:get_int("dmg_health") or 0)
     end
-    if ename=='player_death' then
-        if event:get_int('attacker')==local_idx then stats.kills=stats.kills+1 end
-        if event:get_int('userid')==local_idx   then stats.deaths=stats.deaths+1 end
+
+    if ename == "player_death" then
+        if event:get_int("attacker") == local_idx then
+            stats.kills = stats.kills + 1
+        end
+
+        if event:get_int("userid") == local_idx then
+            stats.deaths = stats.deaths + 1
+        end
     end
 end
 
 function on_level_init()
-    print("[phantom DEBUG] on_level_init() aufgerufen")
-    if not init() then
-        print("[phantom DEBUG] init() in on_level_init fehlgeschlagen!")
+    if not ensure_runtime() then
         return
     end
-    stats   = {kills=0,deaths=0,assists=0,damage=0,hs=0,shots=0,hits=0}
+
+    stats = { kills = 0, deaths = 0, assists = 0, damage = 0, hs = 0, shots = 0, hits = 0 }
     hm_hits = {}
     dmg_log = {}
+    cheaters = {}
+    bb_names = {}
 end
 
 function on_draw_model_execute(dme, ent_index, model_name)
-    if not _ready then dme(); return end
+    if not ensure_runtime() then
+        dme()
+        return
+    end
+
     local local_idx = engine.get_local_player()
-    if ent_index==local_idx then dme(); return end
-    if not model_name:find("models/player") then dme(); return end
+    if ent_index == local_idx then
+        dme()
+        return
+    end
+
+    if not model_name or not model_name:find("models/player") then
+        dme()
+        return
+    end
+
     local ent = entities.get_entity(ent_index)
-    if not ent or not ent:is_valid() then dme(); return end
-    local lp    = entities.get_entity(local_idx)
+    if not ent or not ent:is_valid() then
+        dme()
+        return
+    end
+
+    local lp = entities.get_entity(local_idx)
     local lteam = lp and lp:get_prop("m_iTeamNum") or 0
-    if ent:get_prop("m_iTeamNum")==lteam then dme(); return end
-    if C.v_chams and C.v_chams:get() then
-        M.vis:modulate(render.color('#FF4444'))
+    if ent:get_prop("m_iTeamNum") == lteam then
+        dme()
+        return
+    end
+
+    if C.v_chams and ctrl_get(C.v_chams, false) then
+        M.vis:modulate(render.color("#FF4444"))
         mat.override_material(M.vis)
     end
+
     dme()
 end
 
 function on_create_move(cmd, send_packet)
-    if not init() then return end
+    ensure_runtime()
 end
 
 function on_paint()
-    print("[phantom DEBUG] on_paint() aufgerufen")  -- wird einmalig geloggt
-    if not init() then
-        print("[phantom DEBUG] init() in on_paint fehlgeschlagen!")
+    if not ensure_runtime() then
         return
     end
-    if not engine.is_in_game() then return end
 
-    local sw,sh = render.get_screen_size()
-
-    -- Immer ein Debug-Overlay zeichnen um zu sehen ob on_paint laeuft
-    render.text(F.hud, 10, 10,
-        string.format('[phantom DEBUG] on_paint laeuft | ready=%s', tostring(_ready)),
-        render.color(255,100,100), render.align_left, render.align_top)
-
-    if not C.v_watermark then return end
-
-    if C.v_watermark:get() then
-        local info  = engine.get_player_info(engine.get_local_player())
-        local uname = (info and info.name) or 'unknown'
-        local wm    = 'phantom  |  '..uname
-        local tw,th = render.get_text_size(F.big, wm)
-        local px,py = sw-tw-38, 26
-        render.rect_filled(px-7,py-5,px+tw+7,py+th+5, render.color(10,10,20,210))
-        render.rect(px-7,py-5,px+tw+7,py+th+5, render.color(120,60,220,200))
-        render.text(F.big,px,py,wm, render.color(200,160,255), render.align_left, render.align_top)
+    if not engine.is_in_game() then
+        return
     end
 
-    if C.v_stats and C.v_stats:get() then
-        render.text(F.hud, sw-120, 60,
-            string.format('K:%d D:%d DMG:%d', stats.kills, stats.deaths, stats.damage),
-            render.color(200,200,200), render.align_left, render.align_top)
+    local sw = select(1, render.get_screen_size())
+
+    render.text(
+        F.hud,
+        10,
+        10,
+        string.format("[phantom] on_paint aktiv | ready=%s", tostring(_ready)),
+        render.color(255, 100, 100),
+        render.align_left,
+        render.align_top
+    )
+
+    if C.v_watermark and ctrl_get(C.v_watermark, false) then
+        local info = engine.get_player_info(engine.get_local_player())
+        local uname = (info and info.name) or "unknown"
+        local wm = "phantom  |  " .. uname
+        local tw, th = render.get_text_size(F.big, wm)
+        local px, py = sw - tw - 38, 26
+
+        render.rect_filled(px - 7, py - 5, px + tw + 7, py + th + 5, render.color(10, 10, 20, 210))
+        render.rect(px - 7, py - 5, px + tw + 7, py + th + 5, render.color(120, 60, 220, 200))
+        render.text(F.big, px, py, wm, render.color(200, 160, 255), render.align_left, render.align_top)
+    end
+
+    if C.v_stats and ctrl_get(C.v_stats, false) then
+        render.text(
+            F.hud,
+            sw - 120,
+            60,
+            string.format("K:%d D:%d DMG:%d", stats.kills, stats.deaths, stats.damage),
+            render.color(200, 200, 200),
+            render.align_left,
+            render.align_top
+        )
     end
 end
 
 function on_esp_flag(index)
-    if not _ready then return {} end
+    if not ensure_runtime() then
+        return {}
+    end
+
     return {}
 end
 
 function on_console_input(input)
-    local cmd = input:match('^(%S+)')
-    if cmd == 'ph_debug' then
-        print("[phantom DEBUG] Status:")
-        print("  _ready = "..tostring(_ready))
-        print("  _init_tried = "..tostring(_init_tried))
-        print("  lib = "..tostring(lib))
-        print("  utils = "..tostring(utils))
-        print("  render = "..tostring(render))
-        print("  gui = "..tostring(gui))
+    if input == "ph_debug" then
+        print("[phantom] Status:")
+        print("  _ready = " .. tostring(_ready))
+        print("  _init_attempts = " .. tostring(_init_attempts))
+        print("  _last_init_error = " .. tostring(_last_init_error))
+        print("  lib = " .. tostring(lib))
+        print("  utils = " .. tostring(utils))
+        print("  utils.load_file = " .. tostring(utils and utils.load_file))
+        print("  render = " .. tostring(render))
+        print("  gui = " .. tostring(gui))
+        print("  mat = " .. tostring(mat))
         if lib then
-            print("  lib._version = "..(lib._version or "?"))
+            print("  lib._version = " .. tostring(lib._version or "?"))
         end
     end
 end
 
-function on_config_save() end
-function on_config_load() end
+function on_config_save()
+end
 
-print("[phantom DEBUG] Script vollstaendig geparsed – warte auf ersten Callback")
+function on_config_load()
+end
+
+print("[phantom] Script vollstaendig geparsed - warte auf Fatality Callbacks")
+print("[phantom] GUI wurde top-level erstellt, Runtime wird lazy initialisiert")
