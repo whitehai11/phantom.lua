@@ -9,14 +9,19 @@
 
 -- ============================================================
 --  TOP LEVEL: nur reines Lua, keine API-Calls
+--  Fatality macht alle Globals erst NACH dem Parsing verfuegbar.
+--  GUI muss in init() erstellt werden, aber Container MUSS
+--  lua>elements a oder lua>elements b sein.
 -- ============================================================
 local lib    = nil
 local _ready = false
+local C      = {}   -- controls (gui handles)
+local F      = {}   -- fonts
+local M      = {}   -- materials
 
--- alle GUI controls in einer table → kein upvalue-limit problem
-local C = {}   -- controls
-local F = {}   -- fonts
-local M = {}   -- materials
+-- Kurzformen fuer Container-IDs
+local EA = 'lua>elements a'
+local EB = 'lua>elements b'
 
 local WEAPON_NAMES = {
     [1]='Deagle',[2]='Dual Berettas',[3]='Five-SeveN',[4]='Glock',
@@ -38,7 +43,6 @@ local function wpn_name(idx)
     return WEAPON_NAMES[idx] or ('wpn#'..tostring(idx))
 end
 
--- state
 local cheaters     = {}
 local bb_names     = {}
 local stats        = {kills=0,deaths=0,assists=0,damage=0,hs=0,shots=0,hits=0}
@@ -69,7 +73,7 @@ mat_fullbright 0
 ]]
 
 -- ============================================================
---  HILFSFUNKTIONEN  (reines Lua)
+--  HILFSFUNKTIONEN
 -- ============================================================
 local function push_dmg(msg)
     table.insert(dmg_log, 1, {text=msg, alpha=255, t=0})
@@ -115,9 +119,6 @@ local function ax_log(msg)
     if C.ax_status then C.ax_status:add(msg) end
 end
 
--- ============================================================
---  SAVE / LOAD CONFIG  (brauchen C.* controls)
--- ============================================================
 local function save_config()
     if not C.v_enable then return end
     database.save(DB, {
@@ -141,16 +142,13 @@ local function save_config()
         m_cross_gap=C.m_cross_gap:get(), m_shotlog=C.m_shotlog:get(),
         ax_enable=C.ax_enable:get(),
     })
-    if lib then lib.notify('phantom', 'Config gespeichert!') end
+    lib.notify('phantom', 'Config gespeichert!')
 end
 
 local function load_config()
     if not C.v_enable then return end
     local c = database.load(DB)
-    if not c then
-        if lib then lib.notify('phantom', 'Keine Config.') end
-        return
-    end
+    if not c then lib.notify('phantom', 'Keine Config.'); return end
     local function ap(k, val)
         if C[k] and val ~= nil then C[k]:set(val) end
     end
@@ -173,12 +171,9 @@ local function load_config()
     ap('m_crosshair',c.m_crosshair); ap('m_cross_size',c.m_cross_size)
     ap('m_cross_gap',c.m_cross_gap); ap('m_shotlog',c.m_shotlog)
     ap('ax_enable',c.ax_enable)
-    if lib then lib.notify('phantom', 'Config geladen!') end
+    lib.notify('phantom', 'Config geladen!')
 end
 
--- ============================================================
---  AUTOEXEC
--- ============================================================
 local function ax_ensure()
     if not fs.is_file(AX_FILE) then fs.write(AX_FILE, AX_DEFAULT); return true end
     return false
@@ -230,7 +225,8 @@ local function run_autoexec()
 end
 
 -- ============================================================
---  INIT (erste Funktion die in einem Callback aufgerufen wird)
+--  INIT  –  wird beim ersten Callback aufgerufen
+--  Alle gui.*, render.*, mat.* Calls hier drin
 -- ============================================================
 local function init()
     if _ready then return true end
@@ -262,83 +258,92 @@ local function init()
     M.cheater = mat.create("phantom_cheater","VertexLitGeneric",[[
 "VertexLitGeneric"{ "$basetexture" "vgui/white_additive" "$flat" "1" "$ignorez" "1" "$model" "1" "$additive" "1" }]])
 
-    -- GUI Visuals
-    C.v_enable      = gui.checkbox(    'lua>visuals>v_en',  'lua>visuals', 'Enable Visuals')
-    C.v_watermark   = gui.checkbox(    'lua>visuals>v_wm',  'lua>visuals', 'Watermark')
-    C.v_esp_box     = gui.checkbox(    'lua>visuals>v_box', 'lua>visuals', 'ESP Box')
-    C.v_esp_hp      = gui.checkbox(    'lua>visuals>v_hp',  'lua>visuals', 'Health Bar')
-    C.v_esp_name    = gui.checkbox(    'lua>visuals>v_nm',  'lua>visuals', 'Name Flag')
-    C.v_esp_dist    = gui.checkbox(    'lua>visuals>v_di',  'lua>visuals', 'Distance Flag')
-    C.v_esp_weapon  = gui.checkbox(    'lua>visuals>v_wp',  'lua>visuals', 'Weapon Flag')
-    C.v_esp_ammo    = gui.checkbox(    'lua>visuals>v_am',  'lua>visuals', 'Ammo Bar')
-    C.v_esp_snap    = gui.checkbox(    'lua>visuals>v_sn',  'lua>visuals', 'Snaplines')
-    C.v_esp_vis     = gui.checkbox(    'lua>visuals>v_vi',  'lua>visuals', 'Visibility Check')
-    C.v_hitmarker   = gui.checkbox(    'lua>visuals>v_hm',  'lua>visuals', 'Hit Marker')
-    C.v_chams       = gui.checkbox(    'lua>visuals>v_ch',  'lua>visuals', 'Chams')
-    C.v_chams_wall  = gui.checkbox(    'lua>visuals>v_cw',  'lua>visuals', 'Chams Through Wall')
-    C.v_keybinds    = gui.checkbox(    'lua>visuals>v_kb',  'lua>visuals', 'Keybind List')
-    C.v_stats       = gui.checkbox(    'lua>visuals>v_st',  'lua>visuals', 'Session Stats')
-    C.v_dmg_log     = gui.checkbox(    'lua>visuals>v_dl',  'lua>visuals', 'Damage Log')
-    C.v_snap_origin = gui.combobox(    'lua>visuals>v_so',  'lua>visuals', 'Snapline Origin', false, 'Bottom Center','Center Screen')
-    C.col_box_e     = gui.color_picker('lua>visuals>cbe',   'lua>visuals', 'Enemy Box',   render.color('#DC3C3C'), true)
-    C.col_box_v     = gui.color_picker('lua>visuals>cbv',   'lua>visuals', 'Visible Box', render.color('#3CFF3C'), true)
-    C.col_snap      = gui.color_picker('lua>visuals>csn',   'lua>visuals', 'Snapline',    render.color('#DC3C3C'), true)
-    C.col_che       = gui.color_picker('lua>visuals>cce',   'lua>visuals', 'Chams Enemy', render.color('#FF4444'), true)
-    C.col_chw       = gui.color_picker('lua>visuals>ccw',   'lua>visuals', 'Chams Wall',  render.color('#8844FF'), true)
-    C.col_hm        = gui.color_picker('lua>visuals>chm',   'lua>visuals', 'Hit Marker',  render.color('#FF5050'), true)
+    -- --------------------------------------------------------
+    --  GUI – Elements A  (Visuals + ClanTag + Misc)
+    --  Fatality zeigt nur lua>elements a und lua>elements b an
+    -- --------------------------------------------------------
 
-    -- GUI Clan Tag
-    C.ct_enable = gui.checkbox( 'lua>clantag>ct_on',  'lua>clantag', 'Enable')
-    C.ct_tag    = gui.textbox(  'lua>clantag>ct_tag', 'lua>clantag')
-    C.ct_mode   = gui.combobox( 'lua>clantag>ct_mo',  'lua>clantag', 'Animation', false,
+    -- Visuals
+    C.v_enable      = gui.checkbox(    EA..'>v_en',  EA, 'Enable Visuals')
+    C.v_watermark   = gui.checkbox(    EA..'>v_wm',  EA, 'Watermark')
+    C.v_esp_box     = gui.checkbox(    EA..'>v_box', EA, 'ESP Box')
+    C.v_esp_hp      = gui.checkbox(    EA..'>v_hp',  EA, 'Health Bar')
+    C.v_esp_name    = gui.checkbox(    EA..'>v_nm',  EA, 'Name Flag')
+    C.v_esp_dist    = gui.checkbox(    EA..'>v_di',  EA, 'Distance Flag')
+    C.v_esp_weapon  = gui.checkbox(    EA..'>v_wp',  EA, 'Weapon Flag')
+    C.v_esp_ammo    = gui.checkbox(    EA..'>v_am',  EA, 'Ammo Bar')
+    C.v_esp_snap    = gui.checkbox(    EA..'>v_sn',  EA, 'Snaplines')
+    C.v_esp_vis     = gui.checkbox(    EA..'>v_vi',  EA, 'Visibility Check')
+    C.v_hitmarker   = gui.checkbox(    EA..'>v_hm',  EA, 'Hit Marker')
+    C.v_chams       = gui.checkbox(    EA..'>v_ch',  EA, 'Chams')
+    C.v_chams_wall  = gui.checkbox(    EA..'>v_cw',  EA, 'Chams Through Wall')
+    C.v_keybinds    = gui.checkbox(    EA..'>v_kb',  EA, 'Keybind List')
+    C.v_stats       = gui.checkbox(    EA..'>v_st',  EA, 'Session Stats')
+    C.v_dmg_log     = gui.checkbox(    EA..'>v_dl',  EA, 'Damage Log')
+    C.v_snap_origin = gui.combobox(    EA..'>v_so',  EA, 'Snapline Origin', false, 'Bottom Center','Center Screen')
+    C.col_box_e     = gui.color_picker(EA..'>cbe',   EA, 'Enemy Box',   render.color('#DC3C3C'), true)
+    C.col_box_v     = gui.color_picker(EA..'>cbv',   EA, 'Visible Box', render.color('#3CFF3C'), true)
+    C.col_snap      = gui.color_picker(EA..'>csn',   EA, 'Snapline',    render.color('#DC3C3C'), true)
+    C.col_che       = gui.color_picker(EA..'>cce',   EA, 'Chams Enemy', render.color('#FF4444'), true)
+    C.col_chw       = gui.color_picker(EA..'>ccw',   EA, 'Chams Wall',  render.color('#8844FF'), true)
+    C.col_hm        = gui.color_picker(EA..'>chm',   EA, 'Hit Marker',  render.color('#FF5050'), true)
+
+    -- Clan Tag
+    C.ct_enable = gui.checkbox( EA..'>ct_on',  EA, 'Clan Tag Enable')
+    C.ct_tag    = gui.textbox(  EA..'>ct_tag', EA)
+    C.ct_mode   = gui.combobox( EA..'>ct_mo',  EA, 'CT Animation', false,
         'Static','Scroll','Blink','Wave','Typewriter')
-    C.ct_speed  = gui.slider(   'lua>clantag>ct_sp',  'lua>clantag', 'Speed (ms)', 50, 1000)
+    C.ct_speed  = gui.slider(   EA..'>ct_sp',  EA, 'CT Speed (ms)', 50, 1000)
     C.ct_tag:set('fatality.win')
     C.ct_speed:set(200)
 
-    -- GUI Blockbot
-    C.bb_enable = gui.checkbox('lua>blockbot>bb_en', 'lua>blockbot', 'Enable Blockbot')
-    C.bb_mode   = gui.combobox('lua>blockbot>bb_mo', 'lua>blockbot', 'Mode', false,
-        'Front Block','Side Strafe','Reverse Block')
-    C.bb_dist   = gui.slider(  'lua>blockbot>bb_di', 'lua>blockbot', 'Distance (units)', 20, 80)
-    C.bb_player = gui.list(    'lua>blockbot>bb_pl', 'lua>blockbot', 'Target Player', false, 120)
-    C.bb_dist:set(40)
-
-    -- GUI Cheater
-    C.ch_enable     = gui.checkbox(    'lua>cheater>ch_en', 'lua>cheater', 'Enable Cheater System')
-    C.ch_esp_mark   = gui.checkbox(    'lua>cheater>ch_es', 'lua>cheater', 'Mark in ESP')
-    C.ch_chams_mark = gui.checkbox(    'lua>cheater>ch_ch', 'lua>cheater', 'Cheater Chams')
-    C.ch_auto_safe  = gui.checkbox(    'lua>cheater>ch_sa', 'lua>cheater', 'Auto Safe Point')
-    C.ch_notify     = gui.checkbox(    'lua>cheater>ch_no', 'lua>cheater', 'Notify when targeting')
-    C.ch_list       = gui.list(        'lua>cheater>ch_li', 'lua>cheater', 'Marked Cheaters', false, 140)
-    C.ch_unmark_btn = gui.button(      'lua>cheater>ch_un', 'lua>cheater', 'Unmark All')
-    C.col_cheater   = gui.color_picker('lua>cheater>ch_co', 'lua>cheater', 'Cheater Color', render.color('#FFFF00'), true)
-
-    -- GUI Misc
-    C.m_rtt        = gui.checkbox(    'lua>misc>m_rtt',  'lua>misc', 'RTT / Ping')
-    C.m_speedo     = gui.checkbox(    'lua>misc>m_spd',  'lua>misc', 'Speedometer')
-    C.m_crosshair  = gui.checkbox(    'lua>misc>m_xhair','lua>misc', 'Custom Crosshair')
-    C.m_cross_size = gui.slider(      'lua>misc>m_xsz',  'lua>misc', 'Crosshair Size', 2, 20)
-    C.m_cross_gap  = gui.slider(      'lua>misc>m_xgap', 'lua>misc', 'Crosshair Gap',  0, 15)
-    C.col_cross    = gui.color_picker('lua>misc>mxc',    'lua>misc', 'Crosshair Color', render.color('#FFFFFF'), true)
-    C.m_shotlog    = gui.checkbox(    'lua>misc>m_sl',   'lua>misc', 'Shot Logger (file)')
-    C.m_motd       = gui.checkbox(    'lua>misc>m_motd', 'lua>misc', 'Remote MOTD on load')
-    C.m_autoupdate = gui.checkbox(    'lua>misc>m_upd',  'lua>misc', 'Check for updates on load')
+    -- Misc
+    C.m_rtt        = gui.checkbox(    EA..'>m_rtt',  EA, 'RTT / Ping')
+    C.m_speedo     = gui.checkbox(    EA..'>m_spd',  EA, 'Speedometer')
+    C.m_crosshair  = gui.checkbox(    EA..'>m_xhair',EA, 'Custom Crosshair')
+    C.m_cross_size = gui.slider(      EA..'>m_xsz',  EA, 'Crosshair Size', 2, 20)
+    C.m_cross_gap  = gui.slider(      EA..'>m_xgap', EA, 'Crosshair Gap',  0, 15)
+    C.col_cross    = gui.color_picker(EA..'>mxc',    EA, 'Crosshair Color', render.color('#FFFFFF'), true)
+    C.m_shotlog    = gui.checkbox(    EA..'>m_sl',   EA, 'Shot Logger (file)')
+    C.m_motd       = gui.checkbox(    EA..'>m_motd', EA, 'Remote MOTD on load')
+    C.m_autoupdate = gui.checkbox(    EA..'>m_upd',  EA, 'Check for updates on load')
     C.m_cross_size:set(6)
     C.m_cross_gap:set(4)
 
-    -- GUI Autoexec
-    C.ax_enable   = gui.checkbox('lua>autoexec>ax_en',  'lua>autoexec', 'Enable Autoexec')
-    C.ax_run_btn  = gui.button(  'lua>autoexec>ax_run', 'lua>autoexec', 'Run Autoexec Now')
-    C.ax_open_btn = gui.button(  'lua>autoexec>ax_open','lua>autoexec', 'Open / Create File')
-    C.ax_status   = gui.list(    'lua>autoexec>ax_log', 'lua>autoexec', 'Last Run Log', false, 120)
+    -- --------------------------------------------------------
+    --  GUI – Elements B  (Blockbot + Cheater + Autoexec + Config)
+    -- --------------------------------------------------------
 
-    -- GUI Config
-    C.cfg_save  = gui.button('lua>config>csave',  'lua>config', 'Save Config')
-    C.cfg_load  = gui.button('lua>config>cload',  'lua>config', 'Load Config')
-    C.cfg_reset = gui.button('lua>config>creset', 'lua>config', 'Reset Defaults')
+    -- Blockbot
+    C.bb_enable = gui.checkbox(EB..'>bb_en', EB, 'Blockbot Enable')
+    C.bb_mode   = gui.combobox(EB..'>bb_mo', EB, 'Blockbot Mode', false,
+        'Front Block','Side Strafe','Reverse Block')
+    C.bb_dist   = gui.slider(  EB..'>bb_di', EB, 'Blockbot Distance', 20, 80)
+    C.bb_player = gui.list(    EB..'>bb_pl', EB, 'Blockbot Target', false, 100)
+    C.bb_dist:set(40)
 
-    -- Button callbacks
+    -- Cheater
+    C.ch_enable     = gui.checkbox(    EB..'>ch_en', EB, 'Cheater System')
+    C.ch_esp_mark   = gui.checkbox(    EB..'>ch_es', EB, 'Mark in ESP')
+    C.ch_chams_mark = gui.checkbox(    EB..'>ch_ch', EB, 'Cheater Chams')
+    C.ch_auto_safe  = gui.checkbox(    EB..'>ch_sa', EB, 'Auto Safe Point')
+    C.ch_notify     = gui.checkbox(    EB..'>ch_no', EB, 'Notify on target')
+    C.ch_list       = gui.list(        EB..'>ch_li', EB, 'Marked Cheaters', false, 100)
+    C.ch_unmark_btn = gui.button(      EB..'>ch_un', EB, 'Unmark All')
+    C.col_cheater   = gui.color_picker(EB..'>ch_co', EB, 'Cheater Color', render.color('#FFFF00'), true)
+
+    -- Autoexec
+    C.ax_enable   = gui.checkbox(EB..'>ax_en',  EB, 'Autoexec Enable')
+    C.ax_run_btn  = gui.button(  EB..'>ax_run', EB, 'Run Autoexec Now')
+    C.ax_open_btn = gui.button(  EB..'>ax_open',EB, 'Open / Create File')
+    C.ax_status   = gui.list(    EB..'>ax_log', EB, 'Autoexec Log', false, 80)
+
+    -- Config
+    C.cfg_save  = gui.button(EB..'>csave',  EB, 'Save Config')
+    C.cfg_load  = gui.button(EB..'>cload',  EB, 'Load Config')
+    C.cfg_reset = gui.button(EB..'>creset', EB, 'Reset Defaults')
+
+    -- Button Callbacks
     C.cfg_save:add_callback(save_config)
     C.cfg_load:add_callback(load_config)
     C.cfg_reset:add_callback(function()
@@ -365,8 +370,7 @@ local function init()
     C.ch_unmark_btn:add_callback(function()
         lib.dialog('ph_unmark','Cheater','Alle entfernen?', function(yes)
             if not yes then return end
-            cheaters = {}
-            lib.notify('phantom','Cheater-Liste geleert.')
+            cheaters = {}; lib.notify('phantom','Cheater-Liste geleert.')
         end)
     end)
     C.ax_run_btn:add_callback(function()
@@ -377,7 +381,7 @@ local function init()
         lib.notify('phantom autoexec', created and 'erstellt: '..AX_FILE or 'datei: '..AX_FILE)
     end)
 
-    -- Clan Tag Animator
+    -- Clan Tag Animator Timer
     local ct_anim = {
         Static=function(t) return t end,
         Scroll=function(t)
@@ -417,7 +421,7 @@ local function init()
         end)
     end)
 
-    -- Config + Startup
+    -- Startup
     load_config()
     if C.m_motd:get() then
         lib.http.get('https://pastebin.com/raw/phantom_motd', nil, function(r)
@@ -584,7 +588,6 @@ function on_paint()
     local sw,sh = render.get_screen_size()
     local local_ent,local_idx = lib.player.local_ent()
 
-    -- watermark
     if C.v_watermark:get() then
         local info  = engine.get_player_info(local_idx)
         local uname = (info and info.name) or 'unknown'
@@ -597,7 +600,6 @@ function on_paint()
         render.text(F.big,px,py,wm, render.color(200,160,255), render.align_left, render.align_top)
     end
 
-    -- session stats
     if C.v_stats:get() then
         local acc=stats.shots>0 and string.format('%.0f%%',stats.hits/stats.shots*100) or '0%'
         local kd =stats.deaths>0 and string.format('%.2f',stats.kills/stats.deaths) or tostring(stats.kills)
@@ -620,7 +622,6 @@ function on_paint()
         end
     end
 
-    -- rtt
     if C.m_rtt:get() and not C.v_stats:get() then
         local rtt=utils.get_rtt and utils.get_rtt() or 0
         local col=lib.render.lerp_color({220,60,60,220},{60,220,60,220},
@@ -628,7 +629,6 @@ function on_paint()
         lib.render.text_bg(F.hud,sw-60,60,string.format('%dms',rtt),col,render.color(0,0,0,160))
     end
 
-    -- speedometer
     if C.m_speedo:get() and local_ent and local_ent:is_valid() then
         local spd=lib.player.speed(local_ent)
         local col=lib.render.lerp_color({140,140,140,220},{255,140,40,220},
@@ -638,7 +638,6 @@ function on_paint()
         render.text(F.hud,sw/2-tw/2,sh-80,txt,col,render.align_left,render.align_top)
     end
 
-    -- crosshair
     if C.m_crosshair:get() then
         local cx,cy=sw/2,sh/2
         local sz,gap=C.m_cross_size:get(),C.m_cross_gap:get()
@@ -648,7 +647,6 @@ function on_paint()
         render.rect_filled(cx-1,cy-1,cx+1,cy+1,col)
     end
 
-    -- damage log
     if C.v_dmg_log:get() then
         for i=#dmg_log,1,-1 do
             local e=dmg_log[i]; e.t=e.t+1; e.alpha=math.max(0,255-e.t*2)
@@ -658,7 +656,6 @@ function on_paint()
         end
     end
 
-    -- keybinds
     if C.v_keybinds:get() and gui.is_menu_open and not gui.is_menu_open() then
         local idx=0
         gui.for_each_hotkey(function(name,key,mode,is_active)
@@ -670,7 +667,6 @@ function on_paint()
         end)
     end
 
-    -- blockbot indicator
     if C.bb_enable:get() then
         local tgt=get_bb_target()
         local lbl=tgt and 'BLOCKBOT  ON' or 'BLOCKBOT  no target'
@@ -678,7 +674,6 @@ function on_paint()
         render.text(F.hud,sw/2,sh-100,lbl,col,render.align_center,render.align_top)
     end
 
-    -- esp
     if C.v_enable:get() then
         local snap_x=sw/2
         local snap_y=C.v_snap_origin:get()=='Bottom Center' and sh or sh/2
@@ -746,7 +741,6 @@ function on_paint()
         end)
     end
 
-    -- hit marker
     for i=#hm_hits,1,-1 do
         local h=hm_hits[i]; h.t=h.t+1; h.alpha=math.max(0,255-h.t*10)
         if h.alpha<=0 then table.remove(hm_hits,i)
